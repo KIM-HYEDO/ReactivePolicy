@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+
+# Data (too large for git)
+data/
+
+# Training outputs
+outputs/
+
+# Logs & plots
+logs/
+plots/
+recordings/
+
+# LeRobot (separate repo)
+lerobot/
+
+# OMC internal state
+.omc/
+env_runner/.omc/
+
+# Editor
+.vscode/
+.idea/
+
+# Misc
+*.DS_Store
+.claude/
