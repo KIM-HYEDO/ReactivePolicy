@@ -16,8 +16,6 @@ logs/
 plots/
 recordings/
 
-# LeRobot (separate repo)
-lerobot/
 
 # OMC internal state
 .omc/
