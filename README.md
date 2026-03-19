@@ -4,23 +4,42 @@ Reactive imitation learning benchmark using a **Whack-a-Mole** task.
 A mole appears at a random position and the agent must reach it before it disappears.
 The benchmark measures how quickly and accurately a policy reacts to sudden target changes.
 
+## Quick Setup
+
+```bash
+# Clone with submodule
+git clone --recurse-submodules https://github.com/KIM-HYEDO/ReactivePolicy.git
+cd ReactivePolicy
+
+# Create conda environment (installs all dependencies automatically)
+conda env create -f conda_environment.yaml
+conda activate ReactivePolicy
+```
+
+> If you cloned without `--recurse-submodules`, run `git submodule update --init` first.
+
+---
+
 ## Repository Structure
 
 ```
 env/
   mole/
-    mole_env.py           — WhackAMoleEnv (state obs only)
-    mole_image_env.py     — WhackAMoleImageEnv / WhackAMoleReactiveEnv (image + state)
+    mole_env.py           — WhackAMoleBaseEnv (physics, rendering, base only)
+    mole_v1_env.py        — WhackAMoleV1Env (timeout + miss, reactive task)
+    mole_v2_env.py        — WhackAMoleV2Env (no timeout, hit-count task)
+    mole_image_env.py     — V1ImageEnv, V2ImageEnv (image + state obs)
     lerobot_config.py     — lerobot CLI integration (MoleEnvConfig, gym wrapper)
     metrics.py            — success_rate, reaction_latency, hit_error, jerk
     event_logger.py       — JSONL event logger
     dummy_policy.py       — DummyPolicy (oracle, moves toward mole)
 
 env_runner/
-  collect_mole_data.py          — collect demos (simple bezier oracle)
+  collect_mole_data.py          — collect demos (simple oracle)
   collect_reactive_mole_data.py — collect demos (reactive oracle, zarr output)
   mole_runner.py                — benchmark runner with delay sweep
-  eval_reactive_mole.py         — evaluate a trained policy on the env
+  eval_mole_v1.py               — evaluate policy on V1 env (hit rate, latency)
+  eval_mole_v2.py               — evaluate policy on V2 env (hits/episode)
 
 scripts/
   zarr_to_lerobot.py    — convert zarr demo data → LeRobot v3.0 dataset
@@ -39,13 +58,13 @@ lerobot/                — git submodule (huggingface/lerobot v0.5.0)
 
 ---
 
-## Setup
+## Setup (manual)
 
 ### 1. Create conda environment
 
 ```bash
-conda create -n pusht python=3.12
-conda activate pusht
+conda create -n ReactivePolicy python=3.12
+conda activate ReactivePolicy
 ```
 
 ### 2. Install lerobot
@@ -56,16 +75,17 @@ pip install -e ".[smolvla]"
 cd ..
 ```
 
-### 3. Install this package
+### 3. Install this package and additional dependencies
 
 ```bash
 pip install -e .
+pip install pygame pymunk opencv-python "imageio[ffmpeg]" zarr numcodecs matplotlib
 ```
 
 ### 4. Verify
 
 ```bash
-conda run -n pusht python -c "import env.mole; import lerobot; print('OK')"
+conda run -n ReactivePolicy python -c "import env.mole; import lerobot; print('OK')"
 ```
 
 ---
@@ -83,7 +103,7 @@ conda run -n pusht python -c "import env.mole; import lerobot; print('OK')"
 Runs the reactive oracle policy and saves trajectories as a zarr archive.
 
 ```bash
-conda run -n pusht python env_runner/collect_reactive_mole_data.py \
+conda run -n ReactivePolicy python env_runner/collect_reactive_mole_data.py \
     --n_episodes 1000 \
     --max_steps 200 \
     --visible_duration 20 \
@@ -120,7 +140,7 @@ data/reactive_mole/<timestamp>/reactive_mole.zarr
 Converts the zarr archive to the LeRobot v3.0 format required for training.
 
 ```bash
-conda run -n pusht python scripts/zarr_to_lerobot.py \
+conda run -n ReactivePolicy python scripts/zarr_to_lerobot.py \
     --zarr_path data/reactive_mole/<timestamp>/reactive_mole.zarr \
     --out_dir   data/lerobot/reactive_mole \
     --fps 10
@@ -149,7 +169,7 @@ The resulting dataset contains:
 Uses `lerobot-train` with the mole env registered for eval during training.
 
 ```bash
-conda run -n pusht python scripts/train_mole.py \
+conda run -n ReactivePolicy python scripts/train_mole.py \
     --dataset.repo_id=reactive_mole \
     --dataset.root=data/lerobot/reactive_mole \
     --policy.type=diffusion \
@@ -163,7 +183,7 @@ conda run -n pusht python scripts/train_mole.py \
 Training-only (no env eval):
 
 ```bash
-conda run -n pusht python scripts/train_mole.py \
+conda run -n ReactivePolicy python scripts/train_mole.py \
     --dataset.repo_id=reactive_mole \
     --dataset.root=data/lerobot/reactive_mole \
     --policy.type=diffusion \
@@ -177,7 +197,7 @@ conda run -n pusht python scripts/train_mole.py \
 Resume from checkpoint:
 
 ```bash
-conda run -n pusht python scripts/train_mole.py \
+conda run -n ReactivePolicy python scripts/train_mole.py \
     --config_path=outputs/train/diffusion_mole/checkpoints/020000/pretrained_model/train_config.json \
     --resume=true
 ```
@@ -200,7 +220,7 @@ Checkpoints are saved to `outputs/train/diffusion_mole/checkpoints/`.
 Simpler alternative without lerobot's eval loop.
 
 ```bash
-conda run -n pusht python scripts/train_diffusion.py \
+conda run -n ReactivePolicy python scripts/train_diffusion.py \
     --dataset_root data/lerobot/reactive_mole \
     --repo_id reactive_mole \
     --output_dir outputs/train/diffusion_mole \
@@ -215,7 +235,7 @@ conda run -n pusht python scripts/train_diffusion.py \
 Runs the trained policy on the WhackAMole env and reports metrics.
 
 ```bash
-conda run -n pusht python env_runner/eval_reactive_mole.py \
+conda run -n ReactivePolicy python env_runner/eval_mole_v1.py \
     --policy_path outputs/train/diffusion_mole/checkpoints/last \
     --dataset_root data/lerobot/reactive_mole \
     --episodes 100 \
@@ -244,7 +264,7 @@ Reported metrics:
 Evaluates the oracle DummyPolicy across different action delays.
 
 ```bash
-conda run -n pusht python env_runner/mole_runner.py \
+conda run -n ReactivePolicy python env_runner/mole_runner.py \
     --seeds 0 1 2 3 4 \
     --delay_ms 0 50 100 150 \
     --max_steps 200 \

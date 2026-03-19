@@ -1,0 +1,16 @@
+name: ReactivePolicy
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    - pygame
+    - pymunk
+    - opencv-python
+    - "imageio[ffmpeg]"
+    - zarr
+    - numcodecs
+    - matplotlib
+    - "-e ./lerobot[smolvla]"
+    - "-e ."
