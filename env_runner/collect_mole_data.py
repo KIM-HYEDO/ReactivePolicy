@@ -9,7 +9,7 @@ import tqdm
 import zarr
 from numcodecs import Blosc
 
-from env.mole.mole_env import WhackAMoleReactiveEnv as MoleImageEnv
+from env.mole.mole_image_env import WhackAMoleV1ImageEnv as MoleImageEnv
 
 
 # ---------------- Policy helpers ----------------

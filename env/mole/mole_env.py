@@ -15,17 +15,21 @@ from env.mole.pymunk_override import DrawOptions
 logger = logging.getLogger(__name__)
 
 
-class WhackAMoleEnv(gym.Env):
+class WhackAMoleBaseEnv(gym.Env):
+    """Core physics + rendering base.
+
+    Contains no scenario-specific step logic — subclasses (V1, V2, …)
+    implement step() and override _make_info() as needed.
+    """
+
     metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 10}
     reward_range = (0.0, 1.0)
 
     def __init__(
         self,
-        visible_duration: int = 20,       # steps mole stays before miss
-        movement_threshold: float = 3.0,  # px/step to detect movement onset
+        movement_threshold: float = 3.0,
         max_steps: int = 200,
         render_size: int = 96,
-        # inherited physics params
         legacy: bool = False,
         render_action: bool = False,
         render_mode: str = "rgb_array",
@@ -39,12 +43,11 @@ class WhackAMoleEnv(gym.Env):
         self.dt = 1.0 / self.sim_hz
         self.render_action = bool(render_action)
         self.render_mode = render_mode
-        # Local controller params
-        self.k_p, self.k_v = 100, 20    # PD control gains
-        self.control_hz = self.metadata['video.frames_per_second']
+        self.k_p, self.k_v = 100, 20
+        self.control_hz = self.metadata["video.frames_per_second"]
         self.legacy = legacy
         self.damping = damping
-        # env parameters
+
         self.agent_radius = 15.0
         self.n_holes = 1
         self.hole_margin = 20.0
@@ -55,8 +58,6 @@ class WhackAMoleEnv(gym.Env):
         self.min_steps = 20
         self.episode_level = 1
 
-        # reactive params
-        self.visible_duration = visible_duration
         self.movement_threshold = movement_threshold
         self.max_steps = max_steps
 
@@ -86,18 +87,15 @@ class WhackAMoleEnv(gym.Env):
         self.mole_changed = True
         self.t = 0.0
 
-        # reactive runtime state (initialised in reset)
         self._global_step = 0
         self._mole_step = 0
         self._hit_count = 0
-        self._miss_count = 0
         self._moved = False
         self._reaction_latency = None
         self._pos_at_appear = np.zeros(2, dtype=np.float32)
         self._mole_pos_at_appear = np.zeros(2, dtype=np.float32)
         self.event_log = []
 
-        # initialise font once to avoid per-frame allocation failures
         pygame.init()
         try:
             self._hud_font = pygame.font.SysFont("monospace", 18)
@@ -132,11 +130,9 @@ class WhackAMoleEnv(gym.Env):
         self.red_mole_idx = 0
         self.mole_changed = True
 
-        # Try multiple times to avoid spawning too close to the mole.
         for _ in range(10):
             self._setup_world()
             self._spawn_mole()
-
             ap = Vec2d(self.agent.position.x, self.agent.position.y)
             mp = Vec2d(*self.holes[0])
             if (mp - ap).length >= self.min_spawn_dist:
@@ -144,45 +140,13 @@ class WhackAMoleEnv(gym.Env):
 
         self._global_step = 0
         self._hit_count = 0
-        self._miss_count = 0
         self.event_log = []
         obs = self._get_obs()
         self._begin_event(obs)
         return obs, self._make_info()
 
     def step(self, action):
-        self._step_count += 1
-        self._last_action = action
-        self.mole_changed = False
-
-        hit, _agent_pos, _agent_vel = self._physics_step(action)
-
-        self._global_step += 1
-        self._mole_step += 1
-        # ---- movement onset ------------------------------------------- #
-        cur_pos = np.array(self.agent.position, dtype=np.float32)
-        if not self._moved:
-            if np.linalg.norm(cur_pos - self._pos_at_appear) > self.movement_threshold:
-                self._reaction_latency = self._mole_step
-                self._moved = True
-
-        # ---- event outcome -------------------------------------------- #
-        timeout = (not hit) and (self._mole_step >= self.visible_duration)
-
-        if hit or timeout:
-            self._close_event("hit" if hit else "miss")
-            if hit:
-                self._hit_count += 1
-            else:
-                self._miss_count += 1
-            self._spawn_mole()              # new random position
-            obs = self._get_obs()           # obs with new mole
-            self._begin_event(obs)
-        else:
-            obs = self._get_obs()
-
-        truncated = self._global_step >= self.max_steps
-        return obs, float(hit), False, truncated, self._make_info()
+        raise NotImplementedError("Subclasses must implement step().")
 
     def close(self):
         if self.window is not None:
@@ -198,7 +162,6 @@ class WhackAMoleEnv(gym.Env):
     # ------------------------------------------------------------------ #
 
     def _physics_step(self, action):
-        """Run one control step of physics. Returns (hit, agent_pos, agent_vel)."""
         target = self._parse_action_to_target(action)
         n_steps = max(1, int(round(self.sim_hz / float(self.control_hz))))
 
@@ -206,18 +169,14 @@ class WhackAMoleEnv(gym.Env):
         for _ in range(n_steps):
             acc = self.k_p * (target - self.agent.position) + self.k_v * (Vec2d(0, 0) - self.agent.velocity)
             self.agent.velocity += acc * self.dt
-
             self.space.step(self.dt)
             self._clamp_agent_inside()
             self.t += self.dt
-
             if self.red_mole_active and self._is_hit(self.red_mole_idx):
                 hit = True
                 break
 
-        agent_pos = np.array(self.agent.position, dtype=np.float32)
-        agent_vel = np.array(self.agent.velocity, dtype=np.float32)
-        return hit, agent_pos, agent_vel
+        return hit, np.array(self.agent.position, dtype=np.float32), np.array(self.agent.velocity, dtype=np.float32)
 
     def _setup_world(self):
         self.space = pymunk.Space()
@@ -233,7 +192,6 @@ class WhackAMoleEnv(gym.Env):
         self.agent_shape = pymunk.Circle(self.agent, self.agent_radius)
         self.agent_shape.color = pygame.Color("RoyalBlue")
         self.agent_shape.friction = 0.0
-
         self.space.add(self.agent, self.agent_shape)
 
         self.holes = self._make_hole()
@@ -247,7 +205,6 @@ class WhackAMoleEnv(gym.Env):
     def _parse_action_to_target(self, action) -> Vec2d:
         if action is None:
             return Vec2d(self.agent.position.x, self.agent.position.y)
-
         ax = float(np.clip(action[0], 5.0, self.window_size - 5.0))
         ay = float(np.clip(action[1], 5.0, self.window_size - 5.0))
         return Vec2d(ax, ay)
@@ -269,6 +226,17 @@ class WhackAMoleEnv(gym.Env):
         return (mp - self.agent.position).length <= self.hit_radius
 
     # ------------------------------------------------------------------ #
+    # Movement-onset tracking (shared)
+    # ------------------------------------------------------------------ #
+
+    def _track_movement(self):
+        cur_pos = np.array(self.agent.position, dtype=np.float32)
+        if not self._moved:
+            if np.linalg.norm(cur_pos - self._pos_at_appear) > self.movement_threshold:
+                self._reaction_latency = self._mole_step
+                self._moved = True
+
+    # ------------------------------------------------------------------ #
     # Observation
     # ------------------------------------------------------------------ #
 
@@ -278,7 +246,7 @@ class WhackAMoleEnv(gym.Env):
         return {"agent_pos": agent_pos, "mole_pos": mole_pos}
 
     # ------------------------------------------------------------------ #
-    # Internal helpers
+    # Event helpers
     # ------------------------------------------------------------------ #
 
     def _begin_event(self, obs):
@@ -305,16 +273,14 @@ class WhackAMoleEnv(gym.Env):
             "agent_pos":        np.array(self.agent.position, dtype=np.float32),
             "mole_pos":         self.holes[0].copy(),
             "mole_step":        self._mole_step,
-            "steps_remaining":  max(0, self.visible_duration - self._mole_step),
             "reaction_latency": self._reaction_latency,
             "hit_count":        self._hit_count,
-            "miss_count":       self._miss_count,
             "mole_changed":     bool(self.mole_changed),
             "event_log":        self.event_log,
         }
 
     # ------------------------------------------------------------------ #
-    # Rendering — countdown arc + hit flash + HUD
+    # Rendering
     # ------------------------------------------------------------------ #
 
     def render(self):
@@ -325,9 +291,7 @@ class WhackAMoleEnv(gym.Env):
             if self.window is None:
                 pygame.init()
                 pygame.display.init()
-                self.window = pygame.display.set_mode(
-                    (self.window_size, self.window_size)
-                )
+                self.window = pygame.display.set_mode((self.window_size, self.window_size))
             if self.clock is None:
                 self.clock = pygame.time.Clock()
 
@@ -339,31 +303,19 @@ class WhackAMoleEnv(gym.Env):
 
         mx, my = int(self.holes[0][0]), int(self.holes[0][1])
 
-        # ---- countdown arc (human only) --------------------------------- #
-        if mode == "human":
-            ratio = 1.0 - self._mole_step / max(1, self.visible_duration)
-            ratio = float(np.clip(ratio, 0.0, 1.0))
-            r_val = int(255 * (1.0 - ratio))
-            g_val = int(255 * ratio)
-            arc_color = (r_val, g_val, 0)
-            arc_r = int(self.hole_radius) + 6
-            arc_rect = pygame.Rect(mx - arc_r, my - arc_r, arc_r * 2, arc_r * 2)
-            arc_end = math.pi * 2 * ratio
-            if arc_end > 0.01:
-                pygame.draw.arc(canvas, arc_color, arc_rect,
-                                -math.pi / 2, -math.pi / 2 + arc_end, 4)
+        # countdown arc (only modes that show HUD)
+        if mode in ("human", "rgb_array_hud"):
+            self._draw_countdown_arc(canvas, mx, my)
 
-        # ---- hole ------------------------------------------------------ #
-        pygame.draw.circle(canvas, pygame.Color("LightGray"),
-                           (mx, my), int(self.hole_radius), width=0)
-        pygame.draw.circle(canvas, pygame.Color("Gray"),
-                           (mx, my), int(self.hole_radius), width=2)
+        # hole
+        pygame.draw.circle(canvas, pygame.Color("LightGray"), (mx, my), int(self.hole_radius), width=0)
+        pygame.draw.circle(canvas, pygame.Color("Gray"),      (mx, my), int(self.hole_radius), width=2)
 
-        # ---- mole -------------------------------------------------------- #
+        # mole
         if self.red_mole_active:
             pygame.draw.circle(canvas, pygame.Color("OrangeRed"), (mx, my), int(self.mole_radius), width=0)
 
-        # ---- agent + action ------------------------------------------- #
+        # agent
         draw_options = DrawOptions(canvas)
         self.space.debug_draw(draw_options)
 
@@ -372,16 +324,9 @@ class WhackAMoleEnv(gym.Env):
             ay = int(np.clip(float(self._last_action[1]), 0, self.window_size - 1))
             pygame.draw.circle(canvas, pygame.Color("Red"), (ax, ay), 6, width=2)
 
-        # ---- HUD (human only) ----------------------------------------- #
-        if mode == "human" and self._hud_font is not None:
-            hit_surf  = self._hud_font.render(f"HIT:{self._hit_count}", True, (0, 128, 0))
-            miss_surf = self._hud_font.render(f"MISS:{self._miss_count}", True, (180, 0, 0))
-            time_surf = self._hud_font.render(
-                f"T:{self._mole_step}/{self.visible_duration}", True, (60, 60, 60)
-            )
-            canvas.blit(hit_surf,  (8, 8))
-            canvas.blit(miss_surf, (8, 28))
-            canvas.blit(time_surf, (8, 48))
+        # HUD
+        if mode in ("human", "rgb_array_hud") and self._hud_font is not None:
+            self._draw_hud(canvas)
 
         if mode == "human":
             self.window.blit(canvas, canvas.get_rect())
@@ -390,10 +335,16 @@ class WhackAMoleEnv(gym.Env):
             self.clock.tick(self.metadata["video.frames_per_second"])
             return None
 
-        img = np.transpose(
-            np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
-        )
+        img = np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
         return img
+
+    def _draw_countdown_arc(self, canvas, mx, my):
+        """Override in subclasses to customise the arc (or hide it)."""
+        pass
+
+    def _draw_hud(self, canvas):
+        hit_surf = self._hud_font.render(f"HIT:{self._hit_count}", True, (0, 128, 0))
+        canvas.blit(hit_surf, (8, 8))
 
     # ------------------------------------------------------------------ #
     # Teleop

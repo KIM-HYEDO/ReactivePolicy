@@ -35,7 +35,7 @@ import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from env.mole.mole_env import WhackAMoleReactiveEnv as WhackAMoleEnv
+from env.mole.mole_v1_env import WhackAMoleV1Env as WhackAMoleEnv
 from env.mole.dummy_policy import DummyPolicy
 from env.mole.event_logger import EventLogger
 import env.mole.metrics as mole_metrics

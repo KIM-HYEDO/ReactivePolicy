@@ -11,11 +11,13 @@ Usage:
 """
 
 import argparse
+import collections
 import json
 import sys
+import time
 from pathlib import Path
 
-import cv2
+import imageio
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -27,7 +29,7 @@ from lerobot.configs.policies import PreTrainedConfig
 
 # ── Local env ─────────────────────────────────────────────────────────── #
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from env.mole.mole_image_env import WhackAMoleReactiveEnv
+from env.mole.mole_image_env import WhackAMoleV1ImageEnv as WhackAMoleReactiveEnv
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -53,6 +55,10 @@ def parse_args():
                     help="Number of episodes to save as video")
     ap.add_argument("--out_json",      default=None,   type=str,
                     help="Save summary metrics to this JSON file")
+    ap.add_argument("--delay_steps",   default=0,      type=int,
+                    help="Simulate N-step action delay (0 = no delay)")
+    ap.add_argument("--measure_delay", action="store_true",
+                    help="Auto-measure inference latency and set delay_steps accordingly")
     return ap.parse_args()
 
 
@@ -97,6 +103,34 @@ def main():
         pretrained_path=str(pretrained_model_path),
     )
 
+    # ── Measure inference latency and set delay_steps ──────────────────── #
+    if args.measure_delay:
+        dummy_env = WhackAMoleReactiveEnv(render_size=args.render_size)
+        dummy_obs, dummy_info = dummy_env.reset()
+        dummy_batch = preprocessor(obs_to_batch(dummy_obs, dummy_info, DEVICE))
+        # Warmup
+        policy.reset()
+        for _ in range(5):
+            with torch.no_grad():
+                policy.select_action(dummy_batch)
+        policy.reset()
+        # Measure
+        latencies = []
+        for _ in range(30):
+            policy.reset()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                policy.select_action(dummy_batch)
+            latencies.append(time.perf_counter() - t0)
+        dummy_env.close()
+        avg_ms = float(np.mean(latencies)) * 1000
+        step_ms = 1000.0 / args.fps
+        args.delay_steps = max(0, round(avg_ms / step_ms))
+        print(f"Inference latency: {avg_ms:.1f} ms  (step={step_ms:.0f} ms)  →  delay_steps = {args.delay_steps}")
+
+    if args.delay_steps > 0:
+        print(f"Action delay: {args.delay_steps} step(s) = {args.delay_steps * 1000 / args.fps:.0f} ms")
+
     # ── Create environment ─────────────────────────────────────────────── #
     WhackAMoleReactiveEnv.metadata["video.frames_per_second"] = args.fps
     env = WhackAMoleReactiveEnv(
@@ -109,6 +143,9 @@ def main():
     if args.save_video:
         video_dir = Path(args.save_video)
         video_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── n_action_steps: how many actions per inference chunk ───────────── #
+    n_action_steps = getattr(policy_cfg, 'n_action_steps', 1)
 
     # ── Eval loop ──────────────────────────────────────────────────────── #
     all_hit_rates   = []
@@ -123,41 +160,71 @@ def main():
 
         policy.reset()
 
+        # Chunk-aware delay:
+        #   exec_queue    — actions ready to apply this episode
+        #   delayed_chunk — (chunk, countdown) waiting for delay to elapse
+        #   last_action   — repeated while waiting for a delayed chunk
+        exec_queue    = collections.deque()
+        delayed_chunk = None
+        last_action   = np.array(obs["agent_pos"], dtype=np.float32)
+
         # Setup video writer for this episode
         writer = None
         if args.save_video and ep < args.n_videos:
             video_path = str(video_dir / f"ep{ep:04d}.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(video_path, fourcc, args.fps,
-                                     (args.render_size, args.render_size))
+            writer = imageio.get_writer(video_path, fps=args.fps)
 
         for _ in range(args.max_steps):
-            batch = obs_to_batch(obs, info, DEVICE)
-            batch = preprocessor(batch)
+            # Refill exec_queue when it runs out
+            if not exec_queue:
+                if delayed_chunk is not None:
+                    # Decrement delay countdown
+                    chunk_actions, countdown = delayed_chunk
+                    if countdown <= 1:
+                        exec_queue.extend(chunk_actions)
+                        delayed_chunk = None
+                    else:
+                        delayed_chunk = (chunk_actions, countdown - 1)
+                else:
+                    # Run inference and collect full n_action_steps chunk
+                    batch = obs_to_batch(obs, info, DEVICE)
+                    batch = preprocessor(batch)
+                    new_chunk = []
+                    for _c in range(n_action_steps):
+                        with torch.no_grad():
+                            at = policy.select_action(batch)
+                            at = postprocessor(at)
+                        a = at.cpu().numpy()
+                        if a.ndim == 2:
+                            a = a[0]
+                        new_chunk.append(a.astype(np.float32))
 
-            with torch.no_grad():
-                action_t = policy.select_action(batch)   # normalized (1, 2) or (2,)
-                action_t = postprocessor(action_t)        # unnormalize to pixel space
+                    if args.delay_steps > 0:
+                        delayed_chunk = (new_chunk, args.delay_steps)
+                    else:
+                        exec_queue.extend(new_chunk)
 
-            action = action_t.to("cpu").numpy()
-            if action.ndim == 2:
-                action = action[0]
-            action = action.astype(np.float32)
+            # Apply: use next queued action or hold last if still in delay
+            if exec_queue:
+                apply_action = exec_queue.popleft()
+            else:
+                apply_action = last_action
+            last_action = apply_action
 
-            obs, _, terminated, truncated, info = env.step(action)
+            obs, _, terminated, truncated, info = env.step(apply_action)
 
             if args.render:
                 env._render_frame("human")
 
             if writer is not None:
-                frame = env._render_frame("rgb_array")  # HWC uint8
-                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                frame = env._render_frame("rgb_array_hud")  # HWC uint8, with arc+HUD
+                writer.append_data(frame)
 
             if terminated or truncated:
                 break
 
         if writer is not None:
-            writer.release()
+            writer.close()
 
         hits  = info["hit_count"]
         miss  = info["miss_count"]
